@@ -7,6 +7,7 @@ import numpy as np
 import torch
 from auto_gptq.utils import Perplexity
 from memory_tracker import MemoryTracker
+from quanto import Calibration, freeze, quantize
 from tqdm import tqdm
 from transformers import (
     AutoModel,
@@ -88,6 +89,11 @@ def get_parser():
         type=int,
         default=2,
         help="Use Exllamav2 kernel. Set 1 in order to use exllama kernel",
+    )
+    parser.add_argument(
+        "--quanto",
+        action="store_true",
+        help="Use Quanto backend for quantization"
     )
     parser.add_argument(
         "--generate",
@@ -322,6 +328,12 @@ elif args.bitsandbytes:
     model = autoclass.from_pretrained(
         args.model, quantization_config=quantization_config, device_map="auto", torch_dtype=torch.float16
     )
+elif args.quanto:
+    model = autoclass.from_pretrained(args.model, torch_dtype=torch.float16, low_cpu_mem_usage=True).to(0)
+    start = time.time()
+    quantize(model, weights=torch.int8, activations=None)
+    print(f"Time spent on quantizing the model : {time.time()-start}")
+    freeze(model)
 else:
     with device:
         model = autoclass.from_pretrained(args.model, torch_dtype=torch.float16)
@@ -356,7 +368,9 @@ print(f"Model load time: {load_time:.1f} s")
 
 uses_gptq = args.gptq
 uses_bitsandbytes = args.bitsandbytes
+uses_quanto = args.quanto
 print(f"Model uses GPTQ: {uses_gptq}")
+print(f"Model uses quanto: {uses_quanto}")
 print(f"Model uses bitsandbytes: {uses_bitsandbytes}")
 print(f"Using accelerate hooks: {hasattr(model, '_hf_hook')}")
 print(f"Bits: {bits}")

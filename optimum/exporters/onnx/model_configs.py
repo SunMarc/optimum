@@ -37,6 +37,7 @@ from ...utils import (
     DummyVisionEncoderDecoderPastKeyValuesGenerator,
     DummyVisionInputGenerator,
     FalconDummyPastKeyValuesGenerator,
+    GemmaDummyPastKeyValuesGenerator,
     GPTBigCodeDummyPastKeyValuesGenerator,
     MistralDummyPastKeyValuesGenerator,
     NormalizedConfig,
@@ -147,7 +148,7 @@ class DistilBertOnnxConfig(BertOnnxConfig):
 
 
 class MPNetOnnxConfig(DistilBertOnnxConfig):
-    DEFAULT_ONNX_OPSET = 12
+    DEFAULT_ONNX_OPSET = 12  # For lower opsets, results in: Type 'tensor(int64)' of input parameter (/0/auto_model/encoder/Add_1_output_0) of operator (Min) in node (/0/auto_model/encoder/Min) is invalid.
 
 
 class RobertaOnnxConfig(DistilBertOnnxConfig):
@@ -203,16 +204,6 @@ class GPT2OnnxConfig(TextDecoderWithPositionIdsOnnxConfig):
     DEFAULT_ONNX_OPSET = 13
     NORMALIZED_CONFIG_CLASS = NormalizedTextConfig.with_args(num_layers="n_layer", num_attention_heads="n_head")
 
-    @property
-    def values_override(self) -> Optional[Dict[str, Any]]:
-        pad_value_override = {}
-        if not getattr(self._config, "pad_token_id", None):
-            pad_value_override = {"pad_token_id": 0}
-        super_values_override = super().values_override
-        if super_values_override:
-            return {**super_values_override, **pad_value_override}
-        return pad_value_override
-
 
 class GPTJOnnxConfig(GPT2OnnxConfig):
     pass
@@ -248,6 +239,12 @@ class LlamaOnnxConfig(TextDecoderWithPositionIdsOnnxConfig):
     DUMMY_INPUT_GENERATOR_CLASSES = (DummyTextInputGenerator, MistralDummyPastKeyValuesGenerator)
     DUMMY_PKV_GENERATOR_CLASS = MistralDummyPastKeyValuesGenerator
     NORMALIZED_CONFIG_CLASS = NormalizedTextConfig
+
+
+class GemmaOnnxConfig(LlamaOnnxConfig):
+    DUMMY_INPUT_GENERATOR_CLASSES = (DummyTextInputGenerator, GemmaDummyPastKeyValuesGenerator)
+    DUMMY_PKV_GENERATOR_CLASS = GemmaDummyPastKeyValuesGenerator
+    pass
 
 
 class PhiOnnxConfig(TextDecoderWithPositionIdsOnnxConfig):
@@ -629,6 +626,7 @@ class M2M100OnnxConfig(TextSeq2SeqOnnxConfig):
 
 class BartOnnxConfig(M2M100OnnxConfig):
     DEFAULT_ONNX_OPSET = 14  # Bart now uses F.scaled_dot_product_attention by default for torch>=2.1.1.
+    MIN_TORCH_VERSION = version.parse("2.1.2")
     pass
 
 
@@ -737,6 +735,10 @@ class DetrOnnxConfig(ViTOnnxConfig):
             return super().outputs
 
 
+class TableTransformerOnnxConfig(DetrOnnxConfig):
+    pass
+
+
 class YolosOnnxConfig(ViTOnnxConfig):
     DEFAULT_ONNX_OPSET = 12
 
@@ -786,23 +788,6 @@ class TimmDefaultOnnxConfig(ViTOnnxConfig):
     ATOL_FOR_VALIDATION = 1e-3
     DEFAULT_ONNX_OPSET = 12
 
-    def __init__(
-        self,
-        config: "PretrainedConfig",
-        task: str = "feature-extraction",
-        preprocessors: Optional[List[Any]] = None,
-        int_dtype: str = "int64",
-        float_dtype: str = "fp32",
-        legacy: bool = False,
-    ):
-        super().__init__(config, task, preprocessors, int_dtype, float_dtype, legacy)
-
-        pretrained_cfg = self._config
-        if hasattr(self._config, "pretrained_cfg"):
-            pretrained_cfg = self._config.pretrained_cfg
-
-        self._normalized_config = self.NORMALIZED_CONFIG_CLASS(pretrained_cfg)
-
     def rename_ambiguous_inputs(self, inputs):
         #  The input name in the model signature is `x, hence the export input name is updated.
         model_inputs = {}
@@ -817,6 +802,7 @@ class TimmDefaultOnnxConfig(ViTOnnxConfig):
 
 class SentenceTransformersTransformerOnnxConfig(TextEncoderOnnxConfig):
     NORMALIZED_CONFIG_CLASS = NormalizedTextConfig
+    DEFAULT_ONNX_OPSET = 14  # Some bottleneck transformers models require a specific ONNX opset to be successfully exported. We put a rather high opset here for the export to work for all architectures.
 
     @property
     def inputs(self) -> Dict[str, Dict[int, str]]:
@@ -1106,6 +1092,10 @@ class OwlViTOnnxConfig(CLIPOnnxConfig):
         return outputs
 
 
+class OwlV2OnnxConfig(OwlViTOnnxConfig):
+    pass
+
+
 class LayoutLMOnnxConfig(TextAndVisionOnnxConfig):
     NORMALIZED_CONFIG_CLASS = NormalizedTextConfig.with_args(
         allow_new=True,
@@ -1356,9 +1346,15 @@ class WhisperOnnxConfig(AudioToTextOnnxConfig):
 
     @property
     def inputs(self) -> Dict[str, Dict[int, str]]:
-        common_inputs = super().inputs
-        if self._behavior is ConfigBehavior.DECODER and self.use_past_in_inputs is False:
-            common_inputs["encoder_outputs"][1] = f"{common_inputs['encoder_outputs'][1]} / 2"
+        if self.task == "audio-classification":
+            common_inputs = {"input_features": {0: "batch_size"}}
+        else:
+            common_inputs = super().inputs
+            if self._behavior is not ConfigBehavior.DECODER:
+                common_inputs["input_features"] = {0: "batch_size"}  # Remove unnecessary dynamic axis.
+
+            if self._behavior is ConfigBehavior.DECODER and self.use_past_in_inputs is False:
+                common_inputs["encoder_outputs"][1] = f"{common_inputs['encoder_outputs'][1]} / 2"
         return common_inputs
 
     @property
@@ -1674,6 +1670,7 @@ class SamOnnxConfig(OnnxConfig):
             inputs = {
                 "pixel_values": {0: "batch_size"},
                 "input_points": {0: "batch_size", 1: "point_batch_size", 2: "nb_points_per_image"},
+                "input_labels": {0: "batch_size", 1: "point_batch_size", 2: "nb_points_per_image"},
             }
         else:
             if self.vision_encoder:
@@ -1683,6 +1680,7 @@ class SamOnnxConfig(OnnxConfig):
                     "image_positional_embeddings": {0: "batch_size"},
                     "image_embeddings": {0: "batch_size"},
                     "input_points": {0: "batch_size", 1: "point_batch_size", 2: "nb_points_per_image"},
+                    "input_labels": {0: "batch_size", 1: "point_batch_size", 2: "nb_points_per_image"},
                 }
         return inputs
 

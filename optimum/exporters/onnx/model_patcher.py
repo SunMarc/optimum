@@ -62,7 +62,9 @@ def patch_everywhere(attribute_name: str, patch: Any, module_name_prefix: Option
         module_name_prefix (`Optional[str]`, defaults to `None`):
             If set, only module names starting with this prefix will be considered for patching.
     """
-    for name, module in sys.modules.items():
+    # sys.modules may be updated while being iterated over, hence the list copy.
+    for name in list(sys.modules):
+        module = sys.modules[name]
         if module_name_prefix is not None and not name.startswith(module_name_prefix):
             continue
         if hasattr(module, attribute_name):
@@ -510,6 +512,7 @@ class SAMModelPatcher(ModelPatcher):
         def patched_forward(
             pixel_values=None,
             input_points=None,
+            input_labels=None,
             image_embeddings=None,
             image_positional_embeddings=None,
             return_dict=True,
@@ -519,6 +522,7 @@ class SAMModelPatcher(ModelPatcher):
                 return self.orig_forward(
                     pixel_values=pixel_values,
                     input_points=input_points,
+                    input_labels=input_labels,
                     image_embeddings=image_embeddings,
                     return_dict=return_dict,
                     **kwargs,
@@ -549,11 +553,7 @@ class SAMModelPatcher(ModelPatcher):
                             "image_positional_embeddings": image_positional_embeddings,
                         }
                 else:
-                    if input_points is not None:
-                        input_labels = torch.ones_like(
-                            input_points[:, :, :, 0], dtype=torch.int, device=input_points.device
-                        )
-                    else:
+                    if input_points is None:
                         raise ValueError("input_points is required to export the prompt encoder / mask decoder.")
 
                     sparse_embeddings, dense_embeddings = model.prompt_encoder(
@@ -762,6 +762,8 @@ class SentenceTransformersTransformerPatcher(ModelPatcher):
                 del result["input_ids"]
             if "attention_mask" in result:
                 del result["attention_mask"]
+            if "all_layer_embeddings" in result:
+                del result["all_layer_embeddings"]
 
             return result
 
